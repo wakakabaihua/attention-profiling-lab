@@ -1,0 +1,27 @@
+深度学习性能分析_2026-03-01 (2).md
+
+# Traces
+traces/*.json
+traces/tb_*/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/

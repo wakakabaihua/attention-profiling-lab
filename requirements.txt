@@ -1,0 +1,16 @@
+# ============================================================
+# Attention Profiling Lab 依赖
+# ============================================================
+#
+# 本项目需要 PyTorch nightly + torch-mlir nightly，
+# 请按以下顺序安装：
+#
+# 1. PyTorch nightly (CUDA 12.6):
+#    pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+#
+# 2. torch-mlir nightly (dev-wheels):
+#    pip install --pre torch-mlir -f https://github.com/llvm/torch-mlir-release/releases/expanded_assets/dev-wheels --no-deps
+#
+# 3. 其余依赖：
+packaging
+numpy
