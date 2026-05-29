@@ -2,31 +2,26 @@
 MLIR Attention Compiler — 从 MLIR 分析到可执行 Triton kernel 的完整编译流水线
 =============================================================================
 
-这是 Stage 3 的核心突破：让我们自己写的 MLIR fusion pass **真正驱动 GPU 执行**。
+v2: 使用 MLIR 原生 Pattern Rewrite 框架（非字符串操作）驱动 GPU 代码生成。
 
-之前的问题:
-    Stage 3 的 AttentionFusionPass 只做了 IR 文本分析，
-    生成的 .mlir 文件从未被执行，torch.compile 也是独立的编译器。
+编译管线:
 
-解决方案:
-    构建完整编译管线，让我们的 MLIR pass 成为编译器的一部分：
+    ┌──────────┐    ┌───────────────────┐    ┌───────────────────────┐    ┌──────────────┐    ┌─────┐
+    │ PyTorch  │ →  │ torch-mlir        │ →  │ MLIR 原生 FusionPass  │ →  │ Triton       │ →  │ GPU │
+    │ Module   │    │ export_and_import  │    │ RewritePatternSet +   │    │ Codegen+编译 │    │ 执行│
+    │          │    │ → ir.Module        │    │ walk_and_apply_patterns│    │              │    │     │
+    └──────────┘    └───────────────────┘    └───────────────────────┘    └──────────────┘    └─────┘
 
-    ┌──────────┐    ┌───────────┐    ┌──────────────────┐    ┌──────────────┐    ┌─────┐
-    │ PyTorch  │ →  │ torch-mlir│ →  │ 我们的 FusionPass │ →  │ Triton       │ →  │ GPU │
-    │ Module   │    │ export    │    │ (模式匹配+属性提取)│    │ Codegen+编译 │    │ 执行│
-    └──────────┘    └───────────┘    └──────────────────┘    └──────────────┘    └─────┘
-
-    关键: Pass 匹配到 scale→mask→softmax 模式后，提取 scale/dim/is_causal 属性，
-    用这些属性参数化一个 Triton kernel 模板，编译为 GPU 可执行代码。
-
-    等价于一个真正的 MLIR 编译器完成了:
-        torch dialect → pattern match → custom fused op → triton lowering → GPU
+    Phase 1 Pass: 匹配 mul.Scalar→where.ScalarSelf→softmax.int
+                  替换为 custom.fused_scaled_masked_softmax {scale, is_causal, algorithm}
+    属性提取:     遍历 ir.Module 找到融合操作，通过 MLIR API 读取属性（非正则表达式）
+    Triton codegen: 用提取的属性参数化 kernel 模板
 
 用法:
     from mlir.mlir_compiler import MLIRCompiler
 
     compiler = MLIRCompiler()
-    compiled_model = compiler.compile(ScaleMaskSoftmax(64, 128))
+    compiled_model = compiler.compile(ScaleMaskSoftmax(64, 128), example_input)
     output = compiled_model(scores)  # 使用 MLIR pass 生成的 Triton kernel 执行
 """
 
@@ -44,8 +39,10 @@ import triton
 import triton.language as tl
 import re
 
-from mlir.export_attention_ir import export_to_torch_dialect, parse_torch_ir
-from mlir.fusion_pass import AttentionFusionPass
+from torch_mlir import ir
+from torch_mlir.fx import export_and_import
+
+from mlir.passes.attention_fusion_pass import run_attention_fusion_pass
 
 
 # =====================================================================
@@ -210,16 +207,21 @@ class MLIRCompiledModule(nn.Module):
 
 class MLIRCompiler:
     """
-    MLIR-based Attention Compiler。
+    MLIR-based Attention Compiler（v2: MLIR 原生 Pass）。
 
     完整编译管线:
-        1. torch-mlir export    — PyTorch Module → MLIR Torch dialect IR
-        2. Fusion pass          — 我们的 AttentionFusionPass 识别融合模式
-        3. Attribute extraction — 从 IR 中提取 scale, is_causal, dim 等属性
+        1. torch-mlir export    — PyTorch Module → ir.Module（真正的 MLIR Module）
+        2. MLIR 原生 Pass       — RewritePatternSet + walk_and_apply_patterns
+                                  匹配 mul.Scalar→where.ScalarSelf→softmax.int
+                                  替换为 custom.fused_scaled_masked_softmax
+        3. Attribute extraction — 遍历 ir.Module 找到融合操作，通过 MLIR API 读取属性
         4. Triton codegen       — 用属性参数化 Triton kernel 模板
         5. Module wrapping      — 包装为 PyTorch Module，可直接 .forward()
 
-    这是一个真正的编译器: IR 分析的结果 *直接驱动* GPU 代码生成。
+    v1 → v2 变化:
+        - 不再使用 fusion_pass.py（字符串匹配 + 正则）
+        - 不再使用 parse_torch_ir()（自定义 IR 解析器）
+        - 属性提取从正则表达式改为 MLIR ir.Operation.attributes API
     """
 
     def __init__(self, verbose: bool = True):
@@ -244,49 +246,46 @@ class MLIRCompiler:
         """
         self.log = []
 
-        # ── Step 1: torch-mlir export ──
-        self._log("[1/5] torch-mlir export: PyTorch → MLIR Torch dialect")
+        # ── Step 1: torch-mlir export → 真正的 ir.Module ──
+        self._log("[1/5] torch-mlir export: PyTorch → ir.Module (Torch dialect)")
         try:
-            mlir_module = export_to_torch_dialect(model, example_input)
-            ir_text = str(mlir_module)
-            ops = parse_torch_ir(ir_text)
-            self._log(f"      → 导出成功: {len(ops)} 个 IR 操作")
+            mlir_module = export_and_import(model, example_input)
+            self._log("      → 导出成功: ir.Module")
         except Exception as e:
             raise RuntimeError(f"torch-mlir export 失败: {e}")
 
-        # ── Step 2: 运行我们的 Fusion Pass ──
-        self._log("[2/5] AttentionFusionPass: 模式匹配")
-        fusion_pass = AttentionFusionPass()
-        candidates = fusion_pass.run(ir_text, ops)
+        # ── Step 2: 运行 MLIR 原生 Fusion Pass ──
+        self._log("[2/5] MLIR 原生 AttentionFusionPass: RewritePatternSet + walk_and_apply_patterns")
+        success = run_attention_fusion_pass(mlir_module)
 
-        if not candidates:
+        # 验证融合操作已创建
+        fused_op = self._find_fused_op(mlir_module)
+        if fused_op is None:
             raise RuntimeError(
                 "Fusion pass 未找到可融合模式。"
                 "输入模型必须包含 scale → mask → softmax 子图。"
             )
+        self._log("      → 匹配成功: mul.Scalar → where.ScalarSelf → softmax.int")
+        self._log("      → 替换为 custom.fused_scaled_masked_softmax")
 
-        candidate = candidates[0]
-        self._log(f"      → 匹配成功: {candidate.scale_op['name']} → "
-                  f"{candidate.mask_op['name']} → {candidate.softmax_op['name']}")
-        self._log(f"      → 可消除 {candidate.total_ops_fused} 个操作 → 1 个融合 op")
+        # ── Step 3: 从融合操作的 MLIR 属性中提取编译参数 ──
+        self._log("[3/5] 属性提取: 从 MLIR ir.Operation.attributes 读取")
+        attrs = dict(fused_op.attributes)
 
-        # ── Step 3: 从 IR 提取融合属性 ──
-        self._log("[3/5] 属性提取: 从 MLIR IR 读取编译参数")
+        # 3a: scale — 从 FloatAttr
+        scale_value = float(ir.FloatAttr(attrs["scale"]).value)
+        self._log(f"      → scale = {scale_value} (FloatAttr)")
 
-        # 3a: scale value — 从 mul.Scalar 的常量操作数中提取
-        scale_value = self._extract_scale(candidate, ir_text)
-        self._log(f"      → scale = {scale_value} (来自 torch.aten.mul.Scalar)")
+        # 3b: is_causal — 从 BoolAttr
+        is_causal = bool(ir.BoolAttr(attrs["is_causal"]).value)
+        self._log(f"      → is_causal = {is_causal} (BoolAttr)")
 
-        # 3b: is_causal — 从 mask 生成模式推断
-        is_causal = self._detect_causal_mask(candidate, ops)
-        self._log(f"      → is_causal = {is_causal} (来自 mask 生成模式分析)")
+        # 3c: softmax_dim — 从 IntegerAttr
+        softmax_dim = int(ir.IntegerAttr(attrs["softmax_dim"]))
+        self._log(f"      → softmax_dim = {softmax_dim} (IntegerAttr)")
 
-        # 3c: softmax_dim — 从 softmax 操作数中提取
-        softmax_dim = self._extract_softmax_dim(candidate, ir_text)
-        self._log(f"      → softmax_dim = {softmax_dim} (来自 torch.aten.softmax.int)")
-
-        # 3d: input shape — 从 IR 类型注解中提取
-        input_shape = self._extract_input_shape(candidate, ir_text)
+        # 3d: input shape — 从融合操作的结果类型
+        input_shape = self._extract_shape_from_type(fused_op.results[0].type)
         self._log(f"      → input_shape = {input_shape}")
 
         # ── Step 4: Triton codegen ──
@@ -311,96 +310,29 @@ class MLIRCompiler:
         return compiled
 
     # -----------------------------------------------------------------
-    # 属性提取（从 MLIR IR 中读取编译参数）
+    # MLIR 原生属性提取
     # -----------------------------------------------------------------
 
-    def _extract_scale(self, candidate, ir_text: str) -> float:
-        """从 MLIR IR 中提取 scale 常量值。"""
-        # candidate.scale_value 是类似 "%float1.250000e-01" 的 SSA 变量名
-        # 需要找到定义它的 torch.constant.float 操作
-        scale_var = candidate.scale_value
-        if not scale_var:
-            return 1.0
+    @staticmethod
+    def _find_fused_op(module: ir.Module):
+        """在 ir.Module 中查找 custom.fused_scaled_masked_softmax 操作。"""
+        for func_op in module.body.operations:
+            for region in func_op.regions:
+                for block in region.blocks:
+                    for op in block.operations:
+                        if op.name == "custom.fused_scaled_masked_softmax":
+                            return op
+        return None
 
-        # 在 IR 文本中查找: %floatXXX = torch.constant.float X.XXXe-XX
-        pattern = re.escape(scale_var) + r'\s*=\s*torch\.constant\.float\s+([\d.eE+\-]+)'
-        match = re.search(pattern, ir_text)
-        if match:
-            return float(match.group(1))
-
-        # 如果 scale_value 本身就是数字字面量
-        try:
-            return float(scale_var)
-        except ValueError:
-            pass
-
-        # 回退: 从 mul.Scalar 行中提取
-        line = candidate.scale_op.get("line", "")
-        float_match = re.search(r'%float([\d.eE+\-]+)', line)
-        if float_match:
-            val = float_match.group(1).replace("_", ".")
-            # 处理 MLIR 格式: 1.250000e-01
-            try:
-                return float(val)
-            except ValueError:
-                pass
-
-        return 0.125  # 默认值 1/sqrt(64)
-
-    def _detect_causal_mask(self, candidate, ops: list) -> bool:
-        """分析 mask 生成模式，判断是否为因果遮罩。"""
-        # 在辅助操作中查找 triu / ge / arange + unsqueeze + sub 模式
-        aux_names = set()
-        for aux in candidate.auxiliary_ops:
-            name = aux.get("name", "")
-            if name:
-                # 提取操作类型
-                if "ones" in name or "arange" in name or "unsqueeze" in name:
-                    aux_names.add("indexing")
-                elif "sub" in name:
-                    aux_names.add("sub")
-                elif "ge" in name:
-                    aux_names.add("compare")
-                elif "logical" in name:
-                    aux_names.add("logic")
-
-        # 如果包含 indexing + sub + compare 模式 → 因果遮罩
-        if "indexing" in aux_names and ("sub" in aux_names or "compare" in aux_names):
-            return True
-
-        # 也检查 mask op 本身
-        mask_name = candidate.mask_op.get("name", "")
-        if "where" in mask_name or "masked_fill" in mask_name:
-            return True
-
-        return False
-
-    def _extract_softmax_dim(self, candidate, ir_text: str) -> int:
-        """从 softmax 操作中提取归约维度。"""
-        line = candidate.softmax_op.get("line", "")
-        # softmax.int 的第二个操作数是 dim
-        # 查找引用的常量: %int-1_XX = torch.constant.int -1
-        for operand in candidate.softmax_op.get("operands", []):
-            if "int" in operand and "-1" in operand:
-                return -1
-
-        # 在 IR 中查找 dim 常量
-        dim_match = re.search(r'%int(-?\d+)', line)
-        if dim_match:
-            return int(dim_match.group(1))
-
-        return -1  # 默认最后一维
-
-    def _extract_input_shape(self, candidate, ir_text: str) -> tuple:
-        """从 IR 类型注解中提取输入 tensor 形状。"""
-        line = candidate.scale_op.get("line", "")
-        # 查找 vtensor<[1,12,128,128],f32>
-        shape_match = re.search(r'vtensor<\[([\d,]+)\]', line)
+    @staticmethod
+    def _extract_shape_from_type(mlir_type) -> tuple:
+        """从 MLIR 类型中提取 tensor 形状。"""
+        type_str = str(mlir_type)
+        shape_match = re.search(r'\[([\d,]+)\]', type_str)
         if shape_match:
             dims = [int(d) for d in shape_match.group(1).split(",")]
             return tuple(dims)
-
-        return (1, 12, 128, 128)  # 默认
+        return (1, 12, 128, 128)
 
 
 # =====================================================================
@@ -501,7 +433,7 @@ def register_mlir_backend():
 
 def verify_compiler_correctness():
     """
-    验证 MLIR 编译器输出与 PyTorch 原生实现的数值一致性。
+    验证 MLIR 编译器（v2: 原生 Pass）输出与 PyTorch 原生实现的数值一致性。
     """
     from mlir.export_attention_ir import ScaleMaskSoftmax
 

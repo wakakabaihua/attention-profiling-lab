@@ -3,7 +3,10 @@
 # Traces
 traces/*.json
 traces/tb_*/
-
+reports/*.ncu-rep
+reports/*.nsys-rep
+reports/*.sqlite
+reports/mini_ai_compiler_pipeline_design.md
 # Python
 __pycache__/
 *.pyc
@@ -12,6 +15,10 @@ __pycache__/
 dist/
 build/
 *.egg
+
+# env
+.venv/*
+.venv/bin/*
 
 # IDE
 .vscode/
@@ -25,3 +32,4 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+reports/MLA_incremental_fusion_pass_plan.md

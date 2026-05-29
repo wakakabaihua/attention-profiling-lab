@@ -1,6 +1,6 @@
 # MLIR Attention Fusion Pass 分析报告
 
-> 生成时间: 2026-03-02 14:24:35
+> 生成时间: 2026-05-29 12:51:30
 > 环境: PyTorch 2.12.0.dev20260301+cu126
 > 模型: ScaleMaskSoftmax (B=1, H=12, T=128, D=64)
 
@@ -143,23 +143,23 @@
 
 | Kernel 类别 | 启动次数 | 耗时 (μs) | 数据来源 |
 |------------|:--------:|:---------:|----------|
-| softmax | 20 | 51.8 | 📂 Stage1 实测 |
-| mask_triu | 20 | 37.0 | 📂 Stage1 实测 |
-| mask_fill | 20 | 41.4 | 📂 Stage1 实测 |
-| **合计** | **60** | **130.3** | 📂 占总 kernel 时间 11.6% |
+| softmax | 30 | 77.0 | 📂 Stage1 实测 |
+| mask_triu | 30 | 56.5 | 📂 Stage1 实测 |
+| mask_fill | 30 | 61.8 | 📂 Stage1 实测 |
+| **合计** | **90** | **195.2** | 📂 占总 kernel 时间 11.5% |
 
 ### 全流水线对比 — Stage 1 实测
 
 > ⚠️ **测量范围: 完整 Attention 流水线** (QK^T → scale → mask → softmax → ·V 及所有辅助 kernel)
 > Triton 融合仅替换了其中 softmax 部分，matmul 等其他 kernel 不变，
-> 而 softmax 子操作仅占总时间 11.6%，因此全流水线加速比较小。
+> 而 softmax 子操作仅占总时间 11.5%，因此全流水线加速比较小。
 
 | 版本 | 总 kernel 数 | 总耗时 (μs) | 加速比 | 数据来源 |
 |------|:-----------:|:----------:|:------:|----------|
-| Baseline (全流水线) | 360 | 1124.3 | 1.00× | 📂 Stage1 实测 |
-| SDPA | 220 | 956.8 | 1.18× | 📂 Stage1 实测 |
-| Triton-3pass | 280 | 1004.2 | 1.12× | 📂 Stage1 实测 |
-| Triton-Online | 280 | 1003.9 | 1.12× | 📂 Stage1 实测 |
+| Baseline (全流水线) | 540 | 1696.4 | 1.00× | 📂 Stage1 实测 |
+| SDPA | 330 | 1440.5 | 1.18× | 📂 Stage1 实测 |
+| Triton-3pass | 420 | 1507.5 | 1.13× | 📂 Stage1 实测 |
+| Triton-Online | 420 | 1502.0 | 1.13× | 📂 Stage1 实测 |
 
 ## 多版本融合 GPU 实测验证 — 仅 ScaleMaskSoftmax 部分
 
@@ -173,52 +173,52 @@
 
 | 版本 | CUDA kernel 数 | CUDA 总耗时 (μs) | μs/iter | 加速比 | 数据来源 |
 |------|:--------------:|:----------------:|:-------:|:------:|----------|
-| 融合前 (独立 kernel) | 282 | 1304.4 | 65.2 | 1.00× | 📊 实测 |
-| MLIR 融合 (compile) | 101 | 721.3 | 36.1 | 1.81× | 📊 实测 |
-| MLIR 自编译 (our pass) | 40 | 101.3 | 5.1 | 12.88× | 📊 实测 |
-| Triton 3-pass | 40 | 101.8 | 5.1 | 12.81× | 📊 实测 |
-| Triton Online | 40 | 100.4 | 5.0 | 13.00× | 📊 实测 |
+| 融合前 (独立 kernel) | 282 | 1339.0 | 66.9 | 1.00× | 📊 实测 |
+| MLIR 融合 (compile) | 101 | 570.1 | 28.5 | 2.35× | 📊 实测 |
+| MLIR 自编译 (our pass) | 40 | 100.9 | 5.0 | 13.27× | 📊 实测 |
+| Triton 3-pass | 40 | 101.6 | 5.1 | 13.17× | 📊 实测 |
+| Triton Online | 40 | 100.5 | 5.0 | 13.32× | 📊 实测 |
 
 ### 融合前 (独立 kernel) — Top Kernels
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `unfused` | 20 | 901.7 | 45.1 | 📊 实测 |
-| `aten::_softmax` | 20 | 51.9 | 2.6 | 📊 实测 |
-| `void (anonymous namespace)::softmax_warp_forw` | 20 | 51.9 | 2.6 | 📊 实测 |
-| `aten::masked_fill_` | 20 | 38.7 | 1.9 | 📊 实测 |
-| `void at::native::elementwise_kernel<128, 2, a` | 20 | 38.7 | 1.9 | 📊 实测 |
+| `unfused` | 20 | 936.8 | 46.8 | 📊 实测 |
+| `aten::_softmax` | 20 | 51.3 | 2.6 | 📊 实测 |
+| `void (anonymous namespace)::softmax_warp_forw` | 20 | 51.3 | 2.6 | 📊 实测 |
+| `aten::masked_fill_` | 20 | 38.6 | 1.9 | 📊 实测 |
+| `void at::native::elementwise_kernel<128, 2, a` | 20 | 38.6 | 1.9 | 📊 实测 |
 
 ### MLIR 融合 (compile) — Top Kernels
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `## Call CompiledFxGraph ffrjlhrwxgd3lebb5yttj` | 20 | 360.0 | 18.0 | 📊 实测 |
-| `aten::_foreach_copy_` | 20 | 134.2 | 6.7 | 📊 实测 |
-| `void at::native::(anonymous namespace)::multi` | 20 | 134.2 | 6.7 | 📊 实测 |
-| `Torch-Compiled Region: 0/0` | 20 | 43.2 | 2.2 | 📊 实测 |
-| `triton_per_fused__softmax_exp_masked_fill_mul` | 20 | 43.2 | 2.2 | 📊 实测 |
+| `## Call CompiledFxGraph ffrjlhrwxgd3lebb5yttj` | 20 | 208.8 | 10.4 | 📊 实测 |
+| `aten::_foreach_copy_` | 20 | 134.4 | 6.7 | 📊 实测 |
+| `void at::native::(anonymous namespace)::multi` | 20 | 134.4 | 6.7 | 📊 实测 |
+| `Torch-Compiled Region: 0/0` | 20 | 42.8 | 2.1 | 📊 实测 |
+| `triton_per_fused__softmax_exp_masked_fill_mul` | 20 | 42.8 | 2.1 | 📊 实测 |
 
 ### MLIR 自编译 (our pass) — Top Kernels
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `_mlir_compiled_fused_softmax_kernel` | 20 | 50.6 | 2.5 | 📊 实测 |
-| `mlir_compiled` | 20 | 50.6 | 2.5 | 📊 实测 |
+| `_mlir_compiled_fused_softmax_kernel` | 20 | 50.4 | 2.5 | 📊 实测 |
+| `mlir_compiled` | 20 | 50.4 | 2.5 | 📊 实测 |
 
 ### Triton 3-pass — Top Kernels
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `_fused_scale_mask_softmax_fwd` | 20 | 50.9 | 2.5 | 📊 实测 |
-| `triton_3pass` | 20 | 50.9 | 2.5 | 📊 实测 |
+| `_fused_scale_mask_softmax_fwd` | 20 | 50.8 | 2.5 | 📊 实测 |
+| `triton_3pass` | 20 | 50.8 | 2.5 | 📊 实测 |
 
 ### Triton Online — Top Kernels
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `_online_softmax_fwd` | 20 | 50.2 | 2.5 | 📊 实测 |
-| `triton_online` | 20 | 50.2 | 2.5 | 📊 实测 |
+| `_online_softmax_fwd` | 20 | 50.3 | 2.5 | 📊 实测 |
+| `triton_online` | 20 | 50.3 | 2.5 | 📊 实测 |
 
 > **说明**:
 > - **四个版本是四种独立实现**，不是叠加组合。每个版本单独运行 ScaleMaskSoftmax 并测量。
@@ -243,94 +243,94 @@
 
 | 版本 | CUDA kernel 数 | CUDA 总耗时 (μs) | μs/iter | 加速比 | 数据来源 |
 |------|:--------------:|:----------------:|:-------:|:------:|----------|
-| 原始 FullAttention | 341 | 2974.8 | 148.7 | 1.00× | 📊 实测 |
-| MLIR 融合 (compile) | 140 | 1823.1 | 91.2 | 1.63× | 📊 实测 |
-| MLIR 自编译 (our pass) | 121 | 2205.7 | 110.3 | 1.35× | 📊 实测 |
-| Triton 3-pass | 121 | 2127.9 | 106.4 | 1.40× | 📊 实测 |
-| Triton Online | 121 | 2122.6 | 106.1 | 1.40× | 📊 实测 |
-| MLIR + Triton 3-pass | 140 | 1825.3 | 91.3 | 1.63× | 📊 实测 |
-| MLIR + Triton Online | 140 | 1840.0 | 92.0 | 1.62× | 📊 实测 |
-| compile + MLIR 自编译 | 140 | 1874.8 | 93.7 | 1.59× | 📊 实测 |
+| 原始 FullAttention | 341 | 2917.3 | 145.9 | 1.00× | 📊 实测 |
+| MLIR 融合 (compile) | 140 | 1761.9 | 88.1 | 1.66× | 📊 实测 |
+| MLIR 自编译 (our pass) | 121 | 2509.6 | 125.5 | 1.16× | 📊 实测 |
+| Triton 3-pass | 121 | 2177.8 | 108.9 | 1.34× | 📊 实测 |
+| Triton Online | 121 | 2222.9 | 111.1 | 1.31× | 📊 实测 |
+| MLIR + Triton 3-pass | 140 | 1890.3 | 94.5 | 1.54× | 📊 实测 |
+| MLIR + Triton Online | 140 | 1886.7 | 94.3 | 1.55× | 📊 实测 |
+| compile + MLIR 自编译 | 140 | 1854.8 | 92.7 | 1.57× | 📊 实测 |
 
 ### 原始 FullAttention — Top Kernels (全流水线)
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `unfused` | 20 | 1676.5 | 83.8 | 📊 实测 |
-| `aten::bmm` | 40 | 444.9 | 11.1 | 📊 实测 |
-| `ampere_sgemm_128x128_nn` | 20 | 271.0 | 13.5 | 📊 实测 |
-| `ampere_sgemm_128x128_tn` | 20 | 173.9 | 8.7 | 📊 实测 |
-| `aten::_softmax` | 20 | 52.0 | 2.6 | 📊 实测 |
+| `unfused` | 20 | 1617.7 | 80.9 | 📊 实测 |
+| `aten::bmm` | 40 | 445.4 | 11.1 | 📊 实测 |
+| `ampere_sgemm_128x128_nn` | 20 | 271.5 | 13.6 | 📊 实测 |
+| `ampere_sgemm_128x128_tn` | 20 | 174.0 | 8.7 | 📊 实测 |
+| `aten::_softmax` | 20 | 51.6 | 2.6 | 📊 实测 |
 
 ### MLIR 融合 (compile) — Top Kernels (全流水线)
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `## Call CompiledFxGraph f7iho6uc4bykoe6cvf2yd` | 20 | 868.3 | 43.4 | 📊 实测 |
-| `aten::bmm` | 40 | 444.0 | 11.1 | 📊 实测 |
-| `ampere_sgemm_128x128_nn` | 20 | 271.0 | 13.6 | 📊 实测 |
-| `ampere_sgemm_128x128_tn` | 20 | 173.0 | 8.6 | 📊 实测 |
-| `triton_per_fused__softmax_exp_masked_fill_mul` | 20 | 33.4 | 1.7 | 📊 实测 |
+| `## Call CompiledFxGraph f7iho6uc4bykoe6cvf2yd` | 20 | 807.4 | 40.4 | 📊 实测 |
+| `aten::bmm` | 40 | 443.6 | 11.1 | 📊 实测 |
+| `ampere_sgemm_128x128_nn` | 20 | 270.9 | 13.5 | 📊 实测 |
+| `ampere_sgemm_128x128_tn` | 20 | 172.6 | 8.6 | 📊 实测 |
+| `triton_per_fused__softmax_exp_masked_fill_mul` | 20 | 33.7 | 1.7 | 📊 实测 |
 
 ### MLIR 自编译 (our pass) — Top Kernels (全流水线)
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `mlir_compiled` | 20 | 1258.8 | 62.9 | 📊 实测 |
-| `aten::bmm` | 40 | 443.8 | 11.1 | 📊 实测 |
-| `ampere_sgemm_128x128_nn` | 20 | 270.9 | 13.5 | 📊 实测 |
-| `ampere_sgemm_128x128_tn` | 20 | 172.9 | 8.6 | 📊 实测 |
-| `_mlir_compiled_fused_softmax_kernel` | 20 | 50.7 | 2.5 | 📊 实测 |
+| `mlir_compiled` | 20 | 1559.9 | 78.0 | 📊 实测 |
+| `aten::bmm` | 40 | 445.0 | 11.1 | 📊 实测 |
+| `ampere_sgemm_128x128_nn` | 20 | 271.2 | 13.6 | 📊 实测 |
+| `ampere_sgemm_128x128_tn` | 20 | 173.8 | 8.7 | 📊 实测 |
+| `_mlir_compiled_fused_softmax_kernel` | 20 | 51.1 | 2.6 | 📊 实测 |
 
 ### Triton 3-pass — Top Kernels (全流水线)
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `triton_3pass` | 20 | 1181.0 | 59.0 | 📊 实测 |
-| `aten::bmm` | 40 | 443.8 | 11.1 | 📊 实测 |
-| `ampere_sgemm_128x128_nn` | 20 | 270.9 | 13.5 | 📊 实测 |
-| `ampere_sgemm_128x128_tn` | 20 | 172.9 | 8.6 | 📊 实测 |
-| `_fused_scale_mask_softmax_fwd` | 20 | 50.8 | 2.5 | 📊 实测 |
+| `triton_3pass` | 20 | 1231.7 | 61.6 | 📊 实测 |
+| `aten::bmm` | 40 | 443.4 | 11.1 | 📊 实测 |
+| `ampere_sgemm_128x128_nn` | 20 | 270.6 | 13.5 | 📊 实测 |
+| `ampere_sgemm_128x128_tn` | 20 | 172.8 | 8.6 | 📊 实测 |
+| `_fused_scale_mask_softmax_fwd` | 20 | 50.7 | 2.5 | 📊 实测 |
 
 ### Triton Online — Top Kernels (全流水线)
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `triton_online` | 20 | 1175.6 | 58.8 | 📊 实测 |
-| `aten::bmm` | 40 | 444.1 | 11.1 | 📊 实测 |
-| `ampere_sgemm_128x128_nn` | 20 | 271.0 | 13.6 | 📊 实测 |
+| `triton_online` | 20 | 1276.2 | 63.8 | 📊 实测 |
+| `aten::bmm` | 40 | 444.0 | 11.1 | 📊 实测 |
+| `ampere_sgemm_128x128_nn` | 20 | 270.9 | 13.5 | 📊 实测 |
 | `ampere_sgemm_128x128_tn` | 20 | 173.1 | 8.7 | 📊 实测 |
-| `_online_softmax_fwd` | 20 | 50.2 | 2.5 | 📊 实测 |
+| `_online_softmax_fwd` | 20 | 50.1 | 2.5 | 📊 实测 |
 
 ### MLIR + Triton 3-pass — Top Kernels (全流水线)
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `## Call CompiledFxGraph fdxfcqknozw6a63api4jk` | 20 | 835.9 | 41.8 | 📊 实测 |
-| `aten::bmm` | 40 | 443.9 | 11.1 | 📊 实测 |
-| `ampere_sgemm_128x128_nn` | 20 | 271.0 | 13.6 | 📊 实测 |
-| `ampere_sgemm_128x128_tn` | 20 | 172.8 | 8.6 | 📊 实测 |
-| `_fused_scale_mask_softmax_fwd_0` | 20 | 50.8 | 2.5 | 📊 实测 |
+| `## Call CompiledFxGraph fdxfcqknozw6a63api4jk` | 20 | 902.3 | 45.1 | 📊 实测 |
+| `aten::bmm` | 40 | 443.4 | 11.1 | 📊 实测 |
+| `ampere_sgemm_128x128_nn` | 20 | 270.8 | 13.5 | 📊 实测 |
+| `ampere_sgemm_128x128_tn` | 20 | 172.6 | 8.6 | 📊 实测 |
+| `_fused_scale_mask_softmax_fwd_0` | 20 | 50.6 | 2.5 | 📊 实测 |
 
 ### MLIR + Triton Online — Top Kernels (全流水线)
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `## Call CompiledFxGraph fed4yvme444pnh72kzwxs` | 20 | 851.6 | 42.6 | 📊 实测 |
-| `aten::bmm` | 40 | 444.0 | 11.1 | 📊 实测 |
-| `ampere_sgemm_128x128_nn` | 20 | 271.0 | 13.6 | 📊 实测 |
-| `ampere_sgemm_128x128_tn` | 20 | 173.0 | 8.6 | 📊 实测 |
-| `_online_softmax_fwd_0` | 20 | 50.2 | 2.5 | 📊 实测 |
+| `## Call CompiledFxGraph fed4yvme444pnh72kzwxs` | 20 | 898.9 | 44.9 | 📊 实测 |
+| `aten::bmm` | 40 | 443.8 | 11.1 | 📊 实测 |
+| `ampere_sgemm_128x128_nn` | 20 | 270.8 | 13.5 | 📊 实测 |
+| `ampere_sgemm_128x128_tn` | 20 | 173.0 | 8.7 | 📊 实测 |
+| `_online_softmax_fwd_0` | 20 | 50.1 | 2.5 | 📊 实测 |
 
 ### compile + MLIR 自编译 — Top Kernels (全流水线)
 
 | Kernel | 调用次数 | 总耗时 (μs) | 平均 (μs) | 数据来源 |
 |--------|:--------:|:-----------:|:---------:|----------|
-| `## Call CompiledFxGraph fg7ltuooxtu2wcl2pqab4` | 20 | 885.9 | 44.3 | 📊 实测 |
-| `aten::bmm` | 40 | 443.8 | 11.1 | 📊 实测 |
-| `ampere_sgemm_128x128_nn` | 20 | 270.9 | 13.5 | 📊 实测 |
-| `ampere_sgemm_128x128_tn` | 20 | 172.9 | 8.6 | 📊 实测 |
-| `_mlir_compiled_fused_softmax_kernel_0` | 20 | 50.7 | 2.5 | 📊 实测 |
+| `## Call CompiledFxGraph fg7ltuooxtu2wcl2pqab4` | 20 | 866.3 | 43.3 | 📊 实测 |
+| `aten::bmm` | 40 | 443.6 | 11.1 | 📊 实测 |
+| `ampere_sgemm_128x128_nn` | 20 | 270.8 | 13.5 | 📊 实测 |
+| `ampere_sgemm_128x128_tn` | 20 | 172.8 | 8.6 | 📊 实测 |
+| `_mlir_compiled_fused_softmax_kernel_0` | 20 | 50.6 | 2.5 | 📊 实测 |
 
 > **说明**:
 > - **六个版本都是独立实现**，各自完成完整 Attention 计算 (QK^T → softmax → ·V)
@@ -343,8 +343,8 @@
 
 | 阶段 | 内容 | 关键发现 | 数据来源 |
 |------|------|----------|----------|
-| Stage 1 Profiling | baseline/SDPA/compiled 对比 | attention 中 60 次碎片化 kernel 启动 | 📂 Stage1 实测 |
-| Stage 2 Triton | 手写 scale+mask+softmax 融合 | 融合为 1 kernel，加速 1.18× (SDPA), 1.12× (Triton) | 📂 Stage1 实测 |
+| Stage 1 Profiling | baseline/SDPA/compiled 对比 | attention 中 90 次碎片化 kernel 启动 | 📂 Stage1 实测 |
+| Stage 2 Triton | 手写 scale+mask+softmax 融合 | 融合为 1 kernel，加速 1.18× (SDPA), 1.13× (Triton) | 📂 Stage1 实测 |
 | Stage 3 MLIR | 编译器 IR 层面融合分析 | 自动识别 36 个可消除操作 | 📊 实测 |
 
 ## 生成文件
